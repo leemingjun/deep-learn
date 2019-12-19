@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from matplotlib import pyplot as plt
 import tensorflow as tf
+from tensorflow.python.data import Dataset
 import time
 # 以上部分是整个模型引用的软件包
 
@@ -106,16 +107,6 @@ def make_train_and_test_data(dataframe, train_data_precent=0.8):
     test_dataframe = dataframe.sample(frac=(1 - train_data_precent))
 
     return train_dataframe, test_dataframe
-
-
-"""
-训练模型。
-@param linear_regressor:  线性回归模型
-@param train_dataframe:  训练数据
-@param feature_col_name:  输入的特征列名称
-@param target_col_name:  目标特征列名称
-@Returns: 返回训练数据和测试数据的Dataframe
-"""
 
 
 def train_mode(linear_regressor, train_dataframe, feature_col_name,

@@ -169,8 +169,7 @@ def inception_v2_base(inputs,
                       min_depth=16,
                       scope=None):
     """
-    构建一个Inception v2 模型。详细情况可参考 http://arxiv.org/abs/1502.03167 中
-    Inception(5b)。
+    构建一个Inception v2 模型。详细情况可参考 http://arxiv.org/abs/1502.03167。
 
     请注意，本模型虽然参考了原始的论文中的模型架构，本模型尽可能的与原始的模型架构一致，但是，
     二者并不完全是一一对应，包括Inception模块的各个分支的顺序（从左到右）、以及模型最后的
@@ -254,7 +253,7 @@ def inception_v2_base(inputs,
             net, filters=[352, 192, 320, 192, 224, 128],
             is_max_pool=True, scope='Inception_v2_5b')
 
-        # Inception_v2_5b 之后的层。全局平均池化和全连接层
+        # 第六构建层，Inception_v2_5b之后的全局平均池化和全连接层
         with tf.variable_scope('Logits'):
             # 全局平均池化
             net = tf.reduce_mean(
@@ -264,7 +263,7 @@ def inception_v2_base(inputs,
             net = tf.layers.dropout(net, rate=0.7,
                                     name='Dropout_1b')
 
-            # 第七构建层，包括一个线性转换层
+            
             net = tf.layers.flatten(net)
             # 全连接层，共有1000个类别的
             logits = tf.layers.dense(

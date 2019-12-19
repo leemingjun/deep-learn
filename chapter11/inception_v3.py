@@ -542,7 +542,7 @@ def inception_v3_base(inputs,
 
 def inception_v3_model(features, labels, mode):
     """
-    本模型的详细情况，请参考：http://arxiv.org/abs/1512.00567.
+    本模型的详细情况，请参考：http://arxiv.org/abs/1512.00567。
 
     构建以Inception V3的模型，从原始图像输入到最终的模型输出。
 
@@ -571,16 +571,14 @@ def inception_v3_model(features, labels, mode):
     dropout_rate = 0.7
     net = tf.layers.dropout(net, rate=dropout_rate,
                             name='Dropout_1b')
-    # 第七构建层，包括一个线性转换层
+    # 第七构建层，包括一个线性转换层和softmax分类层
     # 2048
     net = tf.layers.flatten(net)
     # 全连接层，共有1000个类别的
     logits = tf.layers.dense(
         inputs=net, units=1000, activation=None, name='FC_1000')
 
-    # logits = tf.squeeze(logits, [1, 2], name='SpatialSqueeze')
 
-    # 第八构建层，softmax分类层
     predictions = {
         # (为 PREDICT 和 EVAL 模式)生成预测值
         "classes": tf.argmax(input=logits, axis=1),

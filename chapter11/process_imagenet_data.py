@@ -51,17 +51,17 @@ def convert2_train_example(filename, image_buffer, label, synset, human, bbox,
     @param synsets: 字符串列表。每个字符串代表一个同义词标识（WordNet ID）。
     @param humans: 字符串列表。每个字符串代表一个可读的类别名称。
     @param bbox: 边界框列表，每个图像有0个或者多个边界框，每个边界框都由
-    [xmin, ymin, xmax, ymax]组成
+      [xmin, ymin, xmax, ymax]组成
     @param height: 整型, 图像的高度（像素）
     @param width: 整型, 图像的宽度（像素）
 
     @Returns: proto格式的样本数据
     """
+
     xmin = []
     ymin = []
     xmax = []
     ymax = []
-    # 将对象边界框的各个坐标拆分开，放在四个变量中
     for b in bbox:
         [l.append(point) for l, point in zip([xmin, ymin, xmax, ymax], b)]
 
@@ -143,10 +143,12 @@ class JpegImageCoder(object):
     def decode_jpeg(self, image_data):
         image = self._sess.run(self._decode_jpeg,
                                feed_dict={self._decode_jpeg_data: image_data})
+        assert len(image.shape) == 3
+        assert image.shape[2] == 3
         return image
 
 
-def is_png(filename):
+def _is_png(filename):
     """
     检测一个图像文件是否是 PNG 格式。
 
@@ -161,7 +163,7 @@ def is_png(filename):
     return 'n02105855_2933.jpg' in filename
 
 
-def is_cmyk(filename):
+def _is_cmyk(filename):
     """
     检测图像文件是否使用一个CMYK 色彩看空间的 JPEG 图像。
 
@@ -203,22 +205,24 @@ def process_single_image(filename, coder):
     image_data = tf.gfile.FastGFile(filename, 'rb').read()
 
     # 判断图像是否是 PNG 格式
-    if is_png(filename):
+    if _is_png(filename):
         # 1 将图像从 PNG 格式转换成 JPEG 格式
         print('将图像从 PNG 转换成 JPEG 格式 %s' % filename)
         image_data = coder.png_to_jpeg(image_data)
 
     # 判断图像是否是 CMYK 格式
-    elif is_cmyk(filename):
-        # 2 将图像从 CMYK 编码格式转换成 RGB 编码格式
+    elif _is_cmyk(filename):
+        # 22 将图像从 CMYK 格式转换成 JPEG 格式
         print('将图像从 CMYK 转换成 RGB 格式 %s' % filename)
         image_data = coder.cmyk_to_rgb(image_data)
 
     # 按照 RGB 格式，对图像数据进行解码
     image = coder.decode_jpeg(image_data)
 
+    assert len(image.shape) == 3
     height = image.shape[0]
     width = image.shape[1]
+    assert image.shape[2] == 3
 
     return image_data, height, width
 
@@ -328,8 +332,127 @@ def build_human_labels(synsets, human_readable_labels):
     """
     humans = []
     for s in synsets:
+        assert s in human_readable_labels, ('没有找到: %s的可读标签。' % s)
         humans.append(human_readable_labels[s])
     return humans
+
+
+def build_bounding_boxes(filenames, image_to_bboxes):
+    """
+    给定一个图片，读取它所包含的对象边界框列表。
+
+    @param filenames: 字符串列表。每个字符串代表一个图像的文件名称。
+    @param image_to_bboxes: 字典，从图像文件名到对象边界框列表的映射，列表中
+        可以包含0个或者多个对象边界框。
+
+    @Returns:
+      针对每一个图像的对象边界框列表，每一个图片都可以包含多个对象边界框。
+    """
+    num_image_bbox = 0
+    bboxes = []
+    for f in filenames:
+        # 字典的 key， 本例中采用文件的 basename
+        basename = os.path.basename(f)
+
+        if basename in image_to_bboxes:
+            bboxes.append(image_to_bboxes[basename])
+            num_image_bbox += 1
+
+        # 如果 image_to_bboxes 中没有该文件的对象边界框，那么，
+        # 创建一个空的对象边界框列表（对应于该图像中没有对象边界框）
+        # 或者 该图像中有对象，但是却没有为它创建对象边界框
+        else:
+            bboxes.append([])
+
+    print('找到 %d 个图片的共计 %d 对象边界框' % (
+        len(filenames), num_image_bbox))
+
+    return bboxes
+
+
+def process_imagenet_images(name, filenames, synsets, labels, humans,
+                            bboxes, num_shards):
+    """
+    处理所有的图像，并且，将图像转换成为 TFRecord 格式，保存起来。
+
+    @param name: 字符串。数据集的唯一标识。
+    @param filenames: 字符串列表。每个字符串代表一个图像的文件名称。
+    @param synsets: 字符串列表。每个字符串代表一个同义词标识（WordNet ID）。
+    @param labels: 整数列表。每个整数代表一个图片的类别。
+    @param humans: 字符串列表。每个字符串代表一个可读的类别名称。
+    @param bboxes: 边界框列表，每个图像有0个或者多个边界框。
+    @param num_shards: 并行处理时每个形成处理的图片个数.
+    """
+    assert len(filenames) == len(synsets)
+    assert len(filenames) == len(labels)
+    assert len(filenames) == len(humans)
+    assert len(filenames) == len(bboxes)
+
+    # 按照并行线程的数量，将图像数据分成多个分片
+    spacing = np.linspace(
+        0, len(filenames), num_threads + 1).astype(np.int)
+    ranges = []
+    threads = []
+
+    # 计算每个分片的起止范围
+    # 每个批次的起止范围 [ranges[i][0], ranges[i][1]].
+    # 例如，总样本数量是130万个，线程数量是10个，那么，每个线程处13万个图片
+    # 因为, 线程数量是10个，所以，len(ranges) = 10。
+    # 对应的，ranges[0][0] = 0, ranges[0][1] = 130000。
+    # 对应的，ranges[1][0] = 130001, ranges[1][1] = 160000。
+    #           ……
+    #        åranges[9][0] = 1170001, ranges[9][1] = 1300000
+    for i in xrange(len(spacing) - 1):
+        ranges.append([spacing[i], spacing[i+1]])
+
+    # 加载一个线程，处理一个批次数据
+    print('启动第 {}个线程，处理 {} 批次数据'.format(num_threads, ranges))
+    sys.stdout.flush()
+
+    # 启动线程同步机制，监控等到所有的线程执行完毕
+    coord = tf.train.Coordinator()
+
+    # 创建一个图像编码器
+    coder = JpegImageCoder()
+
+    threads = []
+    for thread_index in xrange(len(ranges)):
+        # 每个线程的参数
+        args = (coder, thread_index, ranges, name, filenames,
+                synsets, labels, humans, bboxes, num_shards)
+        # 创建线程，指定参数
+        t = threading.Thread(target=process_batch_images, args=args)
+        # 启动线程
+        t.start()
+        threads.append(t)
+
+    # 将线程加入到同步机制中，确保所有线程执行完毕
+    coord.join(threads)
+
+    print('%s: 执行完毕，已经将所有的，共 %d 个图片保存到数据集中。' %
+          (datetime.now(), len(filenames)))
+    sys.stdout.flush()
+
+
+def process_imagenet(name, num_shards, synset_to_human):
+    """
+    处理 ImageNet 数据集。
+
+    @param name: 字符串。数据集名称，如 训练集train、验证集validation。
+    @param num_shards: 数据集分成几个分片来处理，每个分片处理多少个图片.
+    @param synset_to_human: 字典。从图片所属的类别到可读的类别映射，例如：
+      'n02119022' --> 'red fox, Vulpes vulpes'
+    """
+    filenames, synsets, labels = find_image_files(
+        data_dir, labels_file)
+    image_to_bboxes = read_annotation_file(filenames)
+    if len(image_to_bboxes) > 0:
+        humans = build_human_labels(synsets, synset_to_human)
+        bboxes = build_bounding_boxes(filenames, image_to_bboxes)
+        process_imagenet_images(name, filenames, synsets, labels,
+                                humans, bboxes, num_shards)
+    else:
+        print("没有找到对象边界框！")
 
 
 def find_image_files(data_dir, labels_file):
@@ -393,7 +516,7 @@ def find_image_files(data_dir, labels_file):
 
     # 对图片进行乱序操作，让模型训练保证足够的多样性
     shuffled_index = list(range(len(filenames)))
-    random.seed(datetime.now)
+    random.seed(12345)
     random.shuffle(shuffled_index)
 
     filenames = [filenames[i] for i in shuffled_index]
@@ -403,6 +526,39 @@ def find_image_files(data_dir, labels_file):
     print('在 {} 文件夹下，查找 {} 类别图片，共找到 {} 个图片文件。'.format
           (data_dir, len(challenge_synsets), len(filenames)))
     return filenames, synsets, labels
+
+
+def read_synset_map(synset_to_human_file):
+    """
+    生成图片 类别ID 与 所属类别名称的映射。
+
+    @synset_to_human_file: 字符串。包含图片类别ID 与 类别映射数据的文件.
+    文件内容如下所示:
+          n02119247    black fox
+          n02119359    silver fox
+          n02119477    red fox, Vulpes fulva
+
+    每行包含一个映射关系，格式如：
+    <同义词标识>\t<可读的类别名称>.
+
+    @Returns:
+      类别ID 到 类别名称的字典
+    """
+
+    # 读取文件内容
+    synset_to_human_file = os.path.join(data_dir, synset_to_human_file)
+    lines = tf.gfile.FastGFile(synset_to_human_file, 'r').readlines()
+    # 要返回的 { 类别标识 -> 类别名称的 } 字典
+    synset_to_human = {}
+    for line in lines:
+        if line:
+            parts = line.strip().split('\t')
+            assert len(parts) == 2
+            synset = parts[0]
+            human = parts[1]
+            synset_to_human[synset] = human
+
+    return synset_to_human
 
 
 def read_annotation_file(image_files):
@@ -477,166 +633,22 @@ def read_annotation_file(image_files):
     return images_to_bboxes
 
 
-def build_bounding_boxes(filenames, image_to_bboxes):
-    """
-    给定一个图片，读取它所包含的对象边界框列表。
-
-    @param filenames: 字符串列表。每个字符串代表一个图像的文件名称。
-    @param image_to_bboxes: 字典，从图像文件名到对象边界框列表的映射，列表中
-    每个图像可以包含0个或者多个对象边界框。理论上，本字典包含所有的对象边界框。
-    @Returns:
-      针对每一个图像的对象边界框列表，每一个图片都可以包含多个对象边界框。
-    """
-    num_image_bbox = 0
-    bboxes = []
-    for f in filenames:
-        # 字典的 key， 本例中采用文件的 basename
-        basename = os.path.basename(f)
-
-        if basename in image_to_bboxes:
-            bboxes.append(image_to_bboxes[basename])
-            num_image_bbox += 1
-        else:
-            # 如果 image_to_bboxes 中没有该文件的对象边界框，那么，
-            # 创建一个空的对象边界框列表（缺少该图像对象边界框信息）
-            bboxes.append([])
-
-    print('找到 %d 个图片的共计 %d 对象边界框' % (
-        len(filenames), num_image_bbox))
-
-    return bboxes
-
-
-def build_synset_map(synset_to_human_file):
-    """
-    生成图片 类别ID 与 所属类别名称的映射。
-
-    @synset_to_human_file: 字符串。包含图片类别ID 与 类别映射数据的文件.
-    文件内容如下所示:
-          n02119247    black fox
-          n02119359    silver fox
-          n02119477    red fox, Vulpes fulva
-
-    每行包含一个映射关系，格式如：
-    <同义词标识>\t<可读的类别名称>.
-
-    @Returns:
-      类别ID 到 类别名称的字典
-    """
-
-    # 读取文件内容
-    synset_to_human_file = os.path.join(data_dir, synset_to_human_file)
-    lines = tf.gfile.FastGFile(synset_to_human_file, 'r').readlines()
-    # 要返回的 { 类别标识 -> 类别名称的 } 字典
-    synset_to_human = {}
-    for line in lines:
-        if line:
-            parts = line.strip().split('\t')
-            synset = parts[0]
-            human = parts[1]
-            synset_to_human[synset] = human
-
-    return synset_to_human
-
-
-def process_imagenet_images(name, filenames, synsets, labels, humans,
-                            bboxes, num_shards):
-    """
-    处理所有的图像，并且，将图像转换成为 TFRecord 格式，保存起来。
-
-    @param name: 字符串。数据集的唯一标识。
-    @param filenames: 字符串列表。每个字符串代表一个图像的文件名称。
-    @param synsets: 字符串列表。每个字符串代表一个同义词标识（WordNet ID）。
-    @param labels: 整数列表。每个整数代表一个图片的类别。
-    @param humans: 字符串列表。每个字符串代表一个可读的类别名称。
-    @param bboxes: 边界框列表，每个图像有0个或者多个边界框。
-    @param num_shards: 并行处理时每个形成处理的图片个数.
-    """
-    # 按照并行线程的数量，将图像数据分成多个分片
-    spacing = np.linspace(
-        0, len(filenames), num_threads + 1).astype(np.int)
-    ranges = []
-    threads = []
-
-    # 计算每个分片的起止范围
-    # 每个批次的起止范围 [ranges[i][0], ranges[i][1]].
-    # 例如，总样本数量是130万个，线程数量是10个，那么，每个线程处13万个图片
-    # 因为, 线程数量是10个，所以，len(ranges) = 10。
-    # 对应的，ranges[0][0] = 0, ranges[0][1] = 130000。
-    # 对应的，ranges[1][0] = 130001, ranges[1][1] = 160000。
-    #           ……
-    #        ranges[9][0] = 1170001, ranges[9][1] = 1300000
-    for i in xrange(len(spacing) - 1):
-        ranges.append([spacing[i], spacing[i+1]])
-
-    # 加载一个线程，处理一个批次数据
-    print('启动第 {}个线程，处理 {} 批次数据'.format(num_threads, ranges))
-    sys.stdout.flush()
-
-    # 启动线程同步机制，监控等到所有的线程执行完毕
-    coord = tf.train.Coordinator()
-
-    # 创建一个图像编码器
-    coder = JpegImageCoder()
-
-    threads = []
-    for thread_index in xrange(len(ranges)):
-        # 每个线程的参数
-        args = (coder, thread_index, ranges, name, filenames,
-                synsets, labels, humans, bboxes, num_shards)
-        # 创建线程，指定参数
-        t = threading.Thread(target=process_batch_images, args=args)
-        # 启动线程
-        t.start()
-        threads.append(t)
-
-    # 等待所有的线程执行完毕（线程同步）
-    coord.join(threads)
-
-    print('%s: 执行完毕，已经将所有的，共 %d 个图片保存到数据集中。' %
-          (datetime.now(), len(filenames)))
-    sys.stdout.flush()
-
-
-def process_imagenet(name, num_shards, synset_to_human):
-    """
-    处理 ImageNet 数据集。
-
-    @param name: 字符串。数据集名称，如 训练集train、验证集validation。
-    @param num_shards: 数据集分成几个分片来处理，每个分片处理多少个图片.
-    @param synset_to_human: 字典。从图片所属的类别到可读的类别映射，例如：
-      'n02119022' --> 'red fox, Vulpes vulpes'
-    """
-    # 所有图像文件名、同义词、同义词标签列表
-    filenames, synsets, labels = find_image_files(
-        data_dir, labels_file)
-    # 读取图像文件所包含的所有对象框列表
-    image_to_bboxes = read_annotation_file(filenames)
-
-    if len(image_to_bboxes) > 0:
-        humans = build_human_labels(synsets, synset_to_human)
-        bboxes = build_bounding_boxes(filenames, image_to_bboxes)
-        # 处理所有的 ImageNet 图像文件
-        process_imagenet_images(name, filenames, synsets, labels,
-                                humans, bboxes, num_shards)
-    else:
-        print("没有找到对象边界框！")
-
-
 def process_imagenet_data():
-    """ 将原始图片转换成为TFRecord格式的样本数据 """
+    """
 
-    # 读取可读分类标签名称,包含所有的分类标签名称
-    synset_to_human = build_synset_map(synset_to_human_file)
+    @Returns:
+      图片到该图片所包含的对象框列表的字典
+    """
+
+    # Build a map from synset to human-readable label.
+    synset_to_human = read_synset_map(synset_to_human_file)
 
     # 数据分片大小，测试集每个分片包括1024个样本
     train_shards = 1024
     # 验证集中，每个数据分片的大小为128个图片
     validation_shards = 128
-    # 将训练集数据转换成 TFRecord 格式的样本数据
     process_imagenet('train', train_shards,
                      synset_to_human)
-    # 将训练集数据转换成 TFRecord 格式的验证数据
     process_imagenet('validation',
                      validation_shards, synset_to_human)
 
@@ -651,7 +663,7 @@ os.makedirs(validation_dir, exist_ok=True)
 labels_file = 'synset_list.txt'
 synset_to_human_file = 'synset_to_human.txt'
 
-# ImageNet 包含图片大约1.3万个，需要并行处理，本例中采用4个线程并行处理
+# ImageNet 包含图片大约1.3万个，需要并行处理，本例中采用4个线程变形处理
 num_threads = 4
 
 # ImageNet图像数据集文件，生成 TFRecord 格式的训练样本
